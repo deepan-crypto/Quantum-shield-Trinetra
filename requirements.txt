@@ -1,0 +1,6 @@
+# Quantum-Safe VPN Dependencies
+cryptography>=41.0.0
+oqs-python>=0.7.2
+asyncio-dgram>=2.1.2
+click>=8.1.0
+colorama>=0.4.6
