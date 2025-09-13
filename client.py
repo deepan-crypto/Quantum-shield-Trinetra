@@ -71,12 +71,11 @@ class VPNClient:
         if not check_tun_support():
             print(f"❌ TUN interface not supported on this system")
             sys.exit(1)
-        
+
         try:
             # Create TUN interface
-            self.tun = TUNInterface("tun0")
-            self.tun.configure_ip("10.8.0.2", "255.255.255.0")
-            
+            self.tun = TUNInterface("tun1")
+
             # Create UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.socket.settimeout(5.0)  # 5 second timeout
@@ -160,37 +159,45 @@ class VPNClient:
             
             # Send handshake response
             self.socket.sendto(response_msg.serialize(), self.server_addr)
-            
+
             # Wait for handshake complete
             data, addr = self.socket.recvfrom(65536)
             message = Message.deserialize(data)
-            
+
             if message.type != MessageType.HANDSHAKE_COMPLETE:
                 print(f"❌ Unexpected message type: {message.type}")
                 return False
-            
+
             complete = HandshakeComplete.deserialize(message.payload)
             if not complete.success:
                 print(f"❌ Handshake failed: {complete.message}")
                 return False
-            
+
+            # Set assigned IP
+            if complete.assigned_ip:
+                self.tun_ip = complete.assigned_ip
+                print(f"   🌐 Assigned IP: {self.tun_ip}")
+            else:
+                print("⚠️  No IP assigned by server")
+                self.tun_ip = "10.8.0.2"  # fallback
+
             # We need to derive the same session key as server
             # For this simplified implementation, we'll use a placeholder
             # In real implementation, server would send its X25519 public key
             x25519_shared = b"placeholder_x25519_shared_secret_32b"  # This should come from server
-            
+
             # Derive session key
             session_key = QuantumSafeCrypto.derive_session_key(kyber_shared, x25519_shared)
-            
+
             # Create session crypto
             self.session_crypto = SessionCrypto(session_key, self.session_id)
             self.connected = True
             self.stats["connect_time"] = time.time()
-            
+
             print(f"✅ Handshake successful")
             print(f"   🔑 Session key: {truncate_hex(session_key)}")
             print(f"   🆔 Session ID: {truncate_hex(self.session_id)}")
-            
+
             return True
             
         except Exception as e:

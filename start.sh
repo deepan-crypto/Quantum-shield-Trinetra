@@ -1,8 +1,4 @@
 #!/bin/bash
-"""
-Quantum-Safe VPN Demo Script
-Demonstrates complete VPN setup and testing
-"""
 
 set -e  # Exit on any error
 
@@ -14,7 +10,7 @@ BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 NC='\033[0m' # No Color
 
-echo -e "${PURPLE}🛡️  Quantum-Safe VPN Demo${NC}"
+echo -e "${PURPLE}🛡️  Quantum-Safe VPN${NC}"
 echo -e "${PURPLE}   Post-Quantum Cryptography Demo${NC}"
 echo "========================================"
 
