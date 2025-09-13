@@ -80,36 +80,46 @@ class VPNClient:
             # Create UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.socket.settimeout(5.0)  # 5 second timeout
-            
+
             self.running = True
-            
+
             print(f"🚀 {Fore.GREEN}Quantum-Safe VPN Client started{Style.RESET_ALL}")
             print(f"   🎯 Server: {self.server_host}:{self.server_port}")
-            print(f"   🌐 TUN interface: tun0 (10.8.0.2/24)")
+            # TUN IP will be assigned by server handshake
+            self.tun_ip = None
+            print(f"   🌐 TUN interface: tun0 (IP to be assigned)")
             print(f"   🔐 Post-quantum crypto: Kyber768 + Dilithium3")
-            
+
             # Perform handshake
             if not self._perform_handshake():
                 print("❌ Handshake failed")
                 self.stop()
                 return
-            
+
+            # Configure TUN IP after handshake
+            if self.tun_ip:
+                self.tun.configure_ip(self.tun_ip, "255.255.255.0")
+                print(f"✓ Configured TUN interface with IP {self.tun_ip}/24")
+            else:
+                print("⚠️  No IP assigned by server, using default 10.8.0.2")
+                self.tun.configure_ip("10.8.0.2", "255.255.255.0")
+
             print(f"✅ {Fore.GREEN}Connected to server{Style.RESET_ALL}\n")
-            
+
             # Start packet handlers
             udp_thread = threading.Thread(target=self._handle_udp_messages, daemon=True)
             udp_thread.start()
-            
+
             tun_thread = threading.Thread(target=self._handle_tun_packets, daemon=True)
             tun_thread.start()
-            
+
             keepalive_thread = threading.Thread(target=self._keepalive_loop, daemon=True)
             keepalive_thread.start()
-            
+
             # Wait for shutdown
             while self.running:
                 time.sleep(1)
-            
+
         except Exception as e:
             print(f"❌ Client startup failed: {e}")
             self.stop()

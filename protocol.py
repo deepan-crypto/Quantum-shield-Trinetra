@@ -120,19 +120,22 @@ class HandshakeResponse:
 
 class HandshakeComplete:
     """Handshake complete message (server -> client)"""
-    
-    def __init__(self, success: bool = True, message: str = "Handshake successful"):
+
+    def __init__(self, success: bool = True, message: str = "Handshake successful", assigned_ip: str = None):
         self.success = success
         self.message = message
-    
+        self.assigned_ip = assigned_ip
+
     def serialize(self) -> bytes:
         """Serialize handshake complete"""
         data = {
             "success": self.success,
             "message": self.message
         }
+        if self.assigned_ip:
+            data["assigned_ip"] = self.assigned_ip
         return json.dumps(data).encode()
-    
+
     @classmethod
     def deserialize(cls, data: bytes) -> 'HandshakeComplete':
         """Deserialize handshake complete"""
@@ -140,7 +143,8 @@ class HandshakeComplete:
             obj = json.loads(data.decode())
             return cls(
                 success=obj.get("success", False),
-                message=obj.get("message", "Unknown status")
+                message=obj.get("message", "Unknown status"),
+                assigned_ip=obj.get("assigned_ip")
             )
         except Exception as e:
             raise ProtocolError(f"Invalid handshake complete: {e}")
