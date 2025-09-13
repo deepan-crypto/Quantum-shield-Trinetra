@@ -10,6 +10,7 @@ import time
 import socket
 import threading
 import signal
+import subprocess
 from typing import Dict, Optional, Tuple
 import click
 from colorama import init, Fore, Style
@@ -18,6 +19,7 @@ from crypto_utils import (
     QuantumSafeCrypto, SessionCrypto, CryptoError,
     load_key_from_file, truncate_hex
 )
+from cryptography.hazmat.primitives import serialization
 from tun_utils import TUNInterface, parse_ip_packet, check_tun_support
 from protocol import (
     Message, MessageType, HandshakeInit, HandshakeResponse, HandshakeComplete,
@@ -27,6 +29,13 @@ from vpn_setup import VPNSetup
 
 # Initialize colorama for cross-platform colored output
 init()
+
+# Enable IP forwarding if not already
+subprocess.run(['sudo', 'sysctl', '-w', 'net.ipv4.ip_forward=1'], check=True)
+# Set up iptables for NAT (assuming tun0 interface)
+subprocess.run(['sudo', 'iptables', '-t', 'nat', '-A', 'POSTROUTING', '-o', 'eth0', '-j', 'MASQUERADE'], check=True)  # Adjust eth0 to your external interface
+subprocess.run(['sudo', 'iptables', '-A', 'FORWARD', '-i', 'tun0', '-o', 'eth0', '-j', 'ACCEPT'], check=True)
+subprocess.run(['sudo', 'iptables', '-A', 'FORWARD', '-i', 'eth0', '-o', 'tun0', '-m', 'state', '--state', 'RELATED,ESTABLISHED', '-j', 'ACCEPT'], check=True)
 
 class VPNServer:
     """Quantum-Safe VPN Server"""
@@ -48,6 +57,8 @@ class VPNServer:
         # Cryptographic keys
         self.dilithium_private = None
         self.dilithium_public = None
+        self.kyber_private = None
+        self.kyber_public = None
         
         # Statistics
         self.stats = {
@@ -72,14 +83,21 @@ class VPNServer:
     def _load_keys(self) -> None:
         """Load server cryptographic keys"""
         try:
-            private_path = os.path.join(self.key_dir, "server_dilithium.pem")
-            public_path = os.path.join(self.key_dir, "server_dilithium_public.pem")
+            dilithium_private_path = os.path.join(self.key_dir, "server_dilithium.pem")
+            dilithium_public_path = os.path.join(self.key_dir, "server_dilithium_public.pem")
+            kyber_private_path = os.path.join(self.key_dir, "server_kyber.pem")
+            kyber_public_path = os.path.join(self.key_dir, "server_kyber_public.pem")
 
-            if not os.path.exists(private_path) or not os.path.exists(public_path):
-                raise CryptoError("Server keys not found. Run 'python3 keygen_server.py' first.")
+            if not os.path.exists(dilithium_private_path) or not os.path.exists(dilithium_public_path):
+                raise CryptoError("Server Dilithium keys not found. Run 'python3 keygen_server.py' first.")
 
-            self.dilithium_private = load_key_from_file(private_path)
-            self.dilithium_public = load_key_from_file(public_path)
+            if not os.path.exists(kyber_private_path) or not os.path.exists(kyber_public_path):
+                raise CryptoError("Server Kyber keys not found. Run 'python3 keygen_server.py' first.")
+
+            self.dilithium_private = load_key_from_file(dilithium_private_path)
+            self.dilithium_public = load_key_from_file(dilithium_public_path)
+            self.kyber_private = load_key_from_file(kyber_private_path)
+            self.kyber_public = load_key_from_file(kyber_public_path)
 
             print(f"✓ Loaded server keys from {self.key_dir}")
 
@@ -202,23 +220,23 @@ class VPNServer:
         try:
             message = Message.deserialize(data)
             client_id = f"{addr[0]}:{addr[1]}"
-            
+
             if message.type == MessageType.HANDSHAKE_INIT:
-                # This shouldn't happen - server sends init
-                self._send_error(addr, "Invalid handshake flow")
-                
+                # Client requesting handshake - send our keys
+                self._handle_handshake_init_request(message, addr)
+
             elif message.type == MessageType.HANDSHAKE_RESPONSE:
                 self._handle_handshake_response(message, addr)
-                
+
             elif message.type == MessageType.DATA_PACKET:
                 self._handle_data_packet(message, addr)
-                
+
             elif message.type == MessageType.KEEPALIVE:
                 self._handle_keepalive(message, addr)
-                
+
             else:
                 print(f"⚠️  Unknown message type from {client_id}: {message.type}")
-                
+
         except ProtocolError as e:
             print(f"❌ Protocol error from {addr}: {e}")
             self._send_error(addr, str(e))
@@ -236,7 +254,7 @@ class VPNServer:
 
             # Decapsulate Kyber shared secret
             kyber_shared = QuantumSafeCrypto.kyber_decapsulate(
-                self.dilithium_private, response.kyber_ciphertext
+                self.kyber_private, response.kyber_ciphertext
             )
 
             # Generate ephemeral X25519 keypair
@@ -270,9 +288,13 @@ class VPNServer:
                 "assigned_ip": assigned_ip
             }
 
-            # Send handshake complete with assigned IP
+            # Send handshake complete with assigned IP and X25519 public key
+            x25519_public_bytes = x25519_public.public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw
+            )
             protocol = VPNProtocol(message.session_id)
-            complete_msg = protocol.create_handshake_complete(True, "Handshake successful", assigned_ip)
+            complete_msg = protocol.create_handshake_complete(True, "Handshake successful", assigned_ip, x25519_public_bytes)
             self.socket.sendto(complete_msg.serialize(), addr)
 
             self.stats["handshakes"] += 1
@@ -320,6 +342,31 @@ class VPNServer:
         except Exception as e:
             print(f"❌ Data packet error from {addr}: {e}")
     
+    def _handle_handshake_init_request(self, message: Message, addr: Tuple[str, int]) -> None:
+        """Handle handshake init request from client - send our keys"""
+        try:
+            client_id = f"{addr[0]}:{addr[1]}"
+            print(f"🔄 {Fore.YELLOW}Handshake init request from {client_id}{Style.RESET_ALL}")
+
+            # Create signature of server info (simplified)
+            server_info = "quantum-safe-vpn-server"
+            signature = QuantumSafeCrypto.dilithium_sign(
+                self.dilithium_private, server_info.encode()
+            )
+
+            # Send handshake init with our keys
+            protocol = VPNProtocol(message.session_id)
+            init_msg = protocol.create_handshake_init(
+                self.dilithium_public, self.kyber_public, signature
+            )
+            self.socket.sendto(init_msg.serialize(), addr)
+
+            print(f"📤 {Fore.GREEN}Sent handshake init to {client_id}{Style.RESET_ALL}")
+
+        except Exception as e:
+            print(f"❌ Handshake init error with {addr}: {e}")
+            self._send_error(addr, "Handshake init failed")
+
     def _handle_keepalive(self, message: Message, addr: Tuple[str, int]) -> None:
         """Handle keepalive message"""
         client = self.clients.get(message.session_id)

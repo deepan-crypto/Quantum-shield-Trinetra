@@ -13,6 +13,7 @@ import signal
 from typing import Optional, Tuple
 import click
 from colorama import init, Fore, Style
+import logging
 
 from crypto_utils import (
     QuantumSafeCrypto, SessionCrypto, CryptoError,
@@ -23,9 +24,12 @@ from protocol import (
     Message, MessageType, HandshakeInit, HandshakeResponse, HandshakeComplete,
     VPNProtocol, ProtocolError, validate_message_size
 )
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
 
 # Initialize colorama
 init()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class VPNClient:
     """Quantum-Safe VPN Client"""
@@ -128,39 +132,49 @@ class VPNClient:
         """Perform handshake with server"""
         try:
             print(f"🔄 {Fore.YELLOW}Starting handshake...{Style.RESET_ALL}")
-            
-            # Generate ephemeral keys
-            x25519_public, x25519_private = QuantumSafeCrypto.generate_x25519_keypair()
-            
-            # Load server's public key (in real implementation, this would be verified)
-            server_public_path = os.path.join(self.key_dir, "server_dilithium_public.pem")
-            if not os.path.exists(server_public_path):
-                print(f"❌ Server public key not found: {server_public_path}")
+
+            # Step 1: Send handshake init request
+            protocol = VPNProtocol()
+            self.session_id = protocol.session_id
+
+            init_request = protocol.create_handshake_init(b"", b"", b"")  # Empty keys for request
+            self.socket.sendto(init_request.serialize(), self.server_addr)
+
+            # Step 2: Wait for server's handshake init
+            data, addr = self.socket.recvfrom(65536)
+            message = Message.deserialize(data)
+
+            if message.type != MessageType.HANDSHAKE_INIT:
+                print(f"❌ Expected handshake init, got: {message.type}")
                 return False
-            
-            server_dilithium_public = load_key_from_file(server_public_path)
-            
-            # Generate Kyber ciphertext and shared secret
-            kyber_ciphertext, kyber_shared = QuantumSafeCrypto.kyber_encapsulate(server_dilithium_public)
-            
-            # Perform X25519 exchange (we'll get server's public key in response)
+
+            server_init = HandshakeInit.deserialize(message.payload)
+            print(f"   📥 Received server handshake init")
+
+            # Step 3: Verify server signature (simplified - just check if keys exist)
+            # In production, verify signature against known server public key
+
+            # Step 4: Generate ephemeral keys
+            x25519_public, x25519_private = QuantumSafeCrypto.generate_x25519_keypair()
+
+            # Step 5: Encapsulate to server's Kyber public key
+            kyber_ciphertext, kyber_shared = QuantumSafeCrypto.kyber_encapsulate(server_init.kyber_pubkey)
+
+            # Step 6: Perform X25519 exchange (server will send its public key in response)
             x25519_public_bytes = x25519_public.public_bytes(
                 encoding=serialization.Encoding.Raw,
                 format=serialization.PublicFormat.Raw
             )
-            
+
             # Create handshake response
-            protocol = VPNProtocol()
-            self.session_id = protocol.session_id
-            
             response_msg = protocol.create_handshake_response(
                 kyber_ciphertext, x25519_public_bytes
             )
-            
+
             # Send handshake response
             self.socket.sendto(response_msg.serialize(), self.server_addr)
 
-            # Wait for handshake complete
+            # Step 7: Wait for handshake complete
             data, addr = self.socket.recvfrom(65536)
             message = Message.deserialize(data)
 
@@ -181,10 +195,14 @@ class VPNClient:
                 print("⚠️  No IP assigned by server")
                 self.tun_ip = "10.8.0.2"  # fallback
 
-            # We need to derive the same session key as server
-            # For this simplified implementation, we'll use a placeholder
-            # In real implementation, server would send its X25519 public key
-            x25519_shared = b"placeholder_x25519_shared_secret_32b"  # This should come from server
+            # Compute X25519 shared secret
+            if complete.x25519_pubkey:
+                server_x25519_pubkey = X25519PublicKey.from_public_bytes(complete.x25519_pubkey)
+                x25519_shared = QuantumSafeCrypto.x25519_exchange(x25519_private, server_x25519_pubkey)
+                print(f"   🔐 X25519 exchange completed")
+            else:
+                print("❌ Server did not send X25519 public key")
+                return False
 
             # Derive session key
             session_key = QuantumSafeCrypto.derive_session_key(kyber_shared, x25519_shared)
@@ -199,9 +217,9 @@ class VPNClient:
             print(f"   🆔 Session ID: {truncate_hex(self.session_id)}")
 
             return True
-            
+
         except Exception as e:
-            print(f"❌ Handshake error: {e}")
+            logging.error(f"Handshake failed: {e}")
             return False
     
     def _handle_udp_messages(self) -> None:
@@ -325,9 +343,6 @@ class VPNClient:
             print(f"   📊 Bytes sent/received: {self.stats['bytes_sent']}/{self.stats['bytes_received']}")
         
         print(f"🛑 {Fore.RED}Client stopped{Style.RESET_ALL}")
-
-# We need to add the missing import
-from cryptography.hazmat.primitives import serialization
 
 @click.command()
 @click.option('--server', default='127.0.0.1', help='Server address')

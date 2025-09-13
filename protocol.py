@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+ #!/usr/bin/env python3
 """
 Protocol definitions for Quantum-Safe VPN
 Defines message formats and handshake protocol
@@ -60,21 +60,23 @@ class Message:
 
 class HandshakeInit:
     """Handshake initialization message (server -> client)"""
-    
-    def __init__(self, dilithium_pubkey: bytes, signature: bytes, server_info: str = "quantum-safe-vpn"):
+
+    def __init__(self, dilithium_pubkey: bytes, kyber_pubkey: bytes, signature: bytes, server_info: str = "quantum-safe-vpn"):
         self.dilithium_pubkey = dilithium_pubkey
+        self.kyber_pubkey = kyber_pubkey
         self.signature = signature
         self.server_info = server_info
-    
+
     def serialize(self) -> bytes:
         """Serialize handshake init"""
         data = {
             "dilithium_pubkey": self.dilithium_pubkey.hex(),
+            "kyber_pubkey": self.kyber_pubkey.hex(),
             "signature": self.signature.hex(),
             "server_info": self.server_info
         }
         return json.dumps(data).encode()
-    
+
     @classmethod
     def deserialize(cls, data: bytes) -> 'HandshakeInit':
         """Deserialize handshake init"""
@@ -82,6 +84,7 @@ class HandshakeInit:
             obj = json.loads(data.decode())
             return cls(
                 dilithium_pubkey=bytes.fromhex(obj["dilithium_pubkey"]),
+                kyber_pubkey=bytes.fromhex(obj["kyber_pubkey"]),
                 signature=bytes.fromhex(obj["signature"]),
                 server_info=obj.get("server_info", "unknown")
             )
@@ -121,10 +124,11 @@ class HandshakeResponse:
 class HandshakeComplete:
     """Handshake complete message (server -> client)"""
 
-    def __init__(self, success: bool = True, message: str = "Handshake successful", assigned_ip: str = None):
+    def __init__(self, success: bool = True, message: str = "Handshake successful", assigned_ip: str = None, x25519_pubkey: bytes = None):
         self.success = success
         self.message = message
         self.assigned_ip = assigned_ip
+        self.x25519_pubkey = x25519_pubkey
 
     def serialize(self) -> bytes:
         """Serialize handshake complete"""
@@ -134,6 +138,8 @@ class HandshakeComplete:
         }
         if self.assigned_ip:
             data["assigned_ip"] = self.assigned_ip
+        if self.x25519_pubkey:
+            data["x25519_pubkey"] = self.x25519_pubkey.hex()
         return json.dumps(data).encode()
 
     @classmethod
@@ -141,10 +147,14 @@ class HandshakeComplete:
         """Deserialize handshake complete"""
         try:
             obj = json.loads(data.decode())
+            x25519_pubkey = None
+            if "x25519_pubkey" in obj:
+                x25519_pubkey = bytes.fromhex(obj["x25519_pubkey"])
             return cls(
                 success=obj.get("success", False),
                 message=obj.get("message", "Unknown status"),
-                assigned_ip=obj.get("assigned_ip")
+                assigned_ip=obj.get("assigned_ip"),
+                x25519_pubkey=x25519_pubkey
             )
         except Exception as e:
             raise ProtocolError(f"Invalid handshake complete: {e}")
@@ -171,9 +181,9 @@ class VPNProtocol:
     def __init__(self, session_id: Optional[bytes] = None):
         self.session_id = session_id or os.urandom(16)
     
-    def create_handshake_init(self, dilithium_pubkey: bytes, signature: bytes) -> Message:
+    def create_handshake_init(self, dilithium_pubkey: bytes, kyber_pubkey: bytes, signature: bytes) -> Message:
         """Create handshake init message"""
-        handshake = HandshakeInit(dilithium_pubkey, signature)
+        handshake = HandshakeInit(dilithium_pubkey, kyber_pubkey, signature)
         return Message(MessageType.HANDSHAKE_INIT, handshake.serialize(), self.session_id)
     
     def create_handshake_response(self, kyber_ciphertext: bytes, x25519_pubkey: bytes) -> Message:
@@ -181,9 +191,9 @@ class VPNProtocol:
         handshake = HandshakeResponse(kyber_ciphertext, x25519_pubkey)
         return Message(MessageType.HANDSHAKE_RESPONSE, handshake.serialize(), self.session_id)
     
-    def create_handshake_complete(self, success: bool = True, message: str = "OK") -> Message:
+    def create_handshake_complete(self, success: bool = True, message: str = "OK", assigned_ip: str = None, x25519_pubkey: bytes = None) -> Message:
         """Create handshake complete message"""
-        handshake = HandshakeComplete(success, message)
+        handshake = HandshakeComplete(success, message, assigned_ip, x25519_pubkey)
         return Message(MessageType.HANDSHAKE_COMPLETE, handshake.serialize(), self.session_id)
     
     def create_data_packet(self, encrypted_data: bytes) -> Message:
